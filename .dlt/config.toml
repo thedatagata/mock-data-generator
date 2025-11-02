@@ -1,0 +1,3 @@
+[destination.filesystem]
+bucket_url = "gs://mock-source-data/paid_advertising/"
+loader_file_format = "parquet"
