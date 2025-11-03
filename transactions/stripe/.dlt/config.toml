@@ -1,0 +1,3 @@
+[destination.filesystem]
+bucket_url = "gs://mock-source-data/transactions/"
+loader_file_format = "parquet"
