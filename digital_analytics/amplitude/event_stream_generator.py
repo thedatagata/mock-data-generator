@@ -1,474 +1,291 @@
 """
-Amplitude Event Stream Data Generator
-Generates realistic user journeys with engagement-based return behavior
+Daily event generator with flow patterns and DuckDB summaries
 """
 import dlt
-import pandas as pd
+import duckdb
+import polars as pl
 from datetime import datetime, timedelta
 import random
 import uuid
-import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from shared_config import *
+from dataclasses import dataclass, asdict
+from typing import List, Optional
 
-from faker import Faker
+from event_taxonomy import (
+    SAAS_EVENT_TAXONOMY, 
+    EVENT_FLOW_PATTERNS,
+    EVENT_ENGAGEMENT_SCORES
+)
 
-fake = Faker()
-Faker.seed(SEED)
-random.seed(SEED)
+ALL_EVENTS = []
+for events in SAAS_EVENT_TAXONOMY.values():
+    ALL_EVENTS.extend(events)
 
-print("Loading lead data...")
-byd_df = pd.read_parquet('gs://mock-source-data/customer_data_population/mock_bookyourdata/bookyourdata/1762095548.474671.701ad8b601.parquet')
-uplead_df = pd.read_parquet('gs://mock-source-data/customer_data_population/mock_upleads/uplead/1762095612.4264941.2fb362f699.parquet')
+DB_PATH = "user_registry.duckdb"
+START_DATE = datetime(2024, 1, 1)
+DAYS_TO_GENERATE = 365
 
-leads_df = pd.concat([byd_df, uplead_df], ignore_index=True)
-print(f"Loaded {len(leads_df)} leads for identified user pool")
-
-# ==========================================
-# ENGAGEMENT SCORING & RETURN BEHAVIOR
-# ==========================================
-
-ENGAGEMENT_WEIGHTS = {
-    'page_view': 1,
-    'button_click': 1,
-    'search': 2,
-    'pricing_page_view': 8,
-    'features_page_view': 5,
-    'add_to_cart': 12,
-    'remove_from_cart': -2,
-    'checkout_start': 15,
-    'whitepaper_download': 12,
-    'demo_requested': 20,
-    'trial_started': 25,
-    'contact_sales_clicked': 18,
-    'pricing_form_submit': 15,
-    'contact_form_submit': 10,
-    'newsletter_subscribe': 5,
-}
-
-RETURN_PROBABILITY = {
-    'bounce': {'return_rate': 0.08, 'days_until_return': (14, 60)},
-    'low_engagement': {'return_rate': 0.18, 'days_until_return': (7, 30)},
-    'medium_engagement': {'return_rate': 0.40, 'days_until_return': (3, 14)},
-    'high_engagement': {'return_rate': 0.65, 'days_until_return': (1, 7)},
-    'very_high_engagement': {'return_rate': 0.85, 'days_until_return': (1, 3)},
-}
-
-def calculate_engagement_score(session_events):
-    """Calculate cumulative engagement score"""
-    score = 0
-    for event in session_events:
-        weight = ENGAGEMENT_WEIGHTS.get(event.get('event_type'), 0)
-        score += weight
-    return max(0, score)
-
-def get_engagement_tier(score):
-    """Categorize engagement level"""
-    if score <= 1:
-        return 'bounce'
-    elif score <= 4:
-        return 'low_engagement'
-    elif score <= 15:
-        return 'medium_engagement'
-    elif score <= 25:
-        return 'high_engagement'
-    else:
-        return 'very_high_engagement'
-
-# ==========================================
-# EVENT TYPES
-# ==========================================
-
-BASE_EVENT_TYPES = [
-    'page_view',
-    'button_click',
-    'search',
-    'pricing_page_view',
-    'features_page_view',
-]
-
-DEVICES = [
-    {'type': 'Android', 'family': 'Samsung Galaxy', 'carrier': 'Verizon', 'os': 'Android', 'version': '13.0'},
-    {'type': 'Android', 'family': 'Google Pixel', 'carrier': 'T-Mobile', 'os': 'Android', 'version': '14.0'},
-    {'type': 'iOS', 'family': 'iPhone', 'carrier': 'AT&T', 'os': 'iOS', 'version': '17.2'},
-    {'type': 'iOS', 'family': 'iPad', 'carrier': 'Verizon', 'os': 'iOS', 'version': '17.1'},
-    {'type': 'Web', 'family': 'Chrome', 'carrier': None, 'os': 'Windows', 'version': '11'},
-    {'type': 'Web', 'family': 'Firefox', 'carrier': None, 'os': 'macOS', 'version': '14.2'},
-]
-
-# ==========================================
-# USER STATE TRACKING
-# ==========================================
-
+@dataclass
 class UserState:
-    """Track user state across sessions"""
-    def __init__(self, device_id):
-        self.device_id = device_id
-        self.user_id = None
-        self.session_count = 0
-        self.total_engagement_score = 0
-        self.is_identified = False
-        self.form_type = None
-        self.trial_path = None
-        self.trial_start_date = None
-        self.converted_to_paid = False
-        self.product_sku = None
-        self.last_session_date = None
-        self.scheduled_return_date = None
-        self.engagement_tier = 'bounce'
+    device_id: str
+    user_id: str
+    email: str = ""
+    is_identified: bool = False
+    is_customer: bool = False
+    session_count: int = 0
+    lifecycle_stage: str = "awareness"
+    last_event_type: str = ""
     
-    def is_returning_user(self):
-        return self.session_count > 1
+    @classmethod
+    def new_anonymous(cls, current_date):
+        device_id = str(uuid.uuid4())
+        return cls(device_id=device_id, user_id=device_id)
     
-    def days_since_last_session(self, current_date):
-        if self.last_session_date:
-            return (current_date - self.last_session_date).days
-        return 0
+    @classmethod
+    def new_lead(cls, current_date):
+        device_id = str(uuid.uuid4())
+        user_uuid = str(uuid.uuid4())
+        return cls(
+            device_id=device_id,
+            user_id=user_uuid,
+            email=f"user_{device_id[:8]}@example.com",
+            is_identified=True,
+            lifecycle_stage="engaged"
+        )
 
-# Global user registry
-user_registry = {}
+@dataclass
+class DailySummary:
+    device_id: str
+    user_id: str
+    activity_date: str
+    email: str = ""
+    is_identified: bool = False
+    is_customer: bool = False
+    events_today: int = 0
+    engagement_score_today: int = 0
+    lifecycle_stage: str = "awareness"
+    return_probability: float = 0.5
+    total_sessions: int = 0
+    last_event_today: str = ""
 
-def get_or_create_user(device_id):
-    """Get existing user or create new one"""
-    if device_id not in user_registry:
-        user_registry[device_id] = UserState(device_id)
-    return user_registry[device_id]
+@dlt.resource(name="daily_user_activity", write_disposition="append", primary_key=["device_id", "activity_date"])
+def daily_summary_resource(summaries: List[DailySummary]):
+    if not summaries:
+        return
+    yield [asdict(s) for s in summaries]
 
-# ==========================================
-# EVENT GENERATION HELPERS
-# ==========================================
+def get_next_event_from_flow(last_event: str) -> Optional[str]:
+    if last_event in EVENT_FLOW_PATTERNS:
+        possible = EVENT_FLOW_PATTERNS[last_event]
+        if random.random() < 0.6:
+            events = list(possible.keys())
+            weights = list(possible.values())
+            return random.choices(events, weights=weights)[0]
+    return None
 
-def should_fill_form(user, engagement_score):
-    """Determine if user fills out a form this session"""
-    if user.is_identified:
-        return random.random() < 0.10  # 10% chance of secondary form
-    
-    tier = get_engagement_tier(engagement_score)
-    form_probability = {
-        'bounce': 0.0,
-        'low_engagement': 0.05,
-        'medium_engagement': 0.20,
-        'high_engagement': 0.45,
-        'very_high_engagement': 0.70,
-    }
-    
-    return random.random() < form_probability.get(tier, 0)
+def update_lifecycle_stage(user: UserState, event_type: str):
+    if event_type in ['payment_completed', 'subscription_created', 'trial_converted']:
+        user.lifecycle_stage = "customer"
+        user.is_customer = True
+    elif event_type in ['subscription_cancelled', 'payment_failed']:
+        user.lifecycle_stage = "churn_risk"
+    elif event_type in ['trial_started', 'account_created']:
+        user.lifecycle_stage = "trial"
+        user.is_identified = True
+    elif event_type in ['first_project_created', 'onboarding_completed']:
+        user.lifecycle_stage = "self_service"
+    elif event_type in ['pricing_page_view', 'demo_requested']:
+        user.lifecycle_stage = "engaged"
 
-def generate_session_events(user, current_date, source_info, campaign):
-    """Generate events for a single session"""
+def generate_event_sequence(user: UserState, current_date) -> List[dict]:
+    """Generate events following flow patterns"""
     events = []
+    num_events = random.randint(1, 10)
+    session_id = int(current_date.timestamp() * 1000) + random.randint(0, 86400000)
     
-    # Determine number of page views based on engagement tier
-    if user.is_returning_user():
-        # Returning users are more engaged
-        page_views = random.randint(3, 12)
+    # Start event based on lifecycle stage
+    if user.last_event_type and random.random() < 0.7:
+        current_event = get_next_event_from_flow(user.last_event_type)
+        if not current_event:
+            current_event = random.choice(ALL_EVENTS)
     else:
-        # New users - varied engagement
-        page_view_dist = [
-            (1, 0.08),   # Bounce
-            (3, 0.25),   # Low
-            (7, 0.40),   # Medium
-            (12, 0.20),  # High
-            (15, 0.07),  # Very high
-        ]
-        page_views = random.choices([p[0] for p in page_view_dist], 
-                                    weights=[p[1] for p in page_view_dist])[0]
+        stage_events = {
+            "awareness": SAAS_EVENT_TAXONOMY['awareness'],
+            "engaged": SAAS_EVENT_TAXONOMY['interest'] + SAAS_EVENT_TAXONOMY['consideration'],
+            "trial": SAAS_EVENT_TAXONOMY['trial_signup'] + SAAS_EVENT_TAXONOMY['activation'],
+            "self_service": SAAS_EVENT_TAXONOMY['product_usage'],
+            "customer": SAAS_EVENT_TAXONOMY['product_usage'] + SAAS_EVENT_TAXONOMY['retention'],
+            "churn_risk": SAAS_EVENT_TAXONOMY['churn_risk']
+        }
+        current_event = random.choice(stage_events.get(user.lifecycle_stage, ALL_EVENTS))
     
-    # Generate page view events
-    for _ in range(page_views):
-        event_type = random.choices(
-            BASE_EVENT_TYPES,
-            weights=[0.60, 0.15, 0.10, 0.10, 0.05]
-        )[0]
-        events.append({'event_type': event_type})
-    
-    # Calculate engagement score
-    engagement_score = calculate_engagement_score(events)
-    
-    # Check if user fills out a form
-    if should_fill_form(user, engagement_score):
-        form_type = select_form_type()
-        form_config = FORM_TYPES[form_type]
+    for i in range(num_events):
+        event_time = current_date + timedelta(
+            hours=random.randint(0, 23),
+            minutes=random.randint(0, 59),
+            seconds=i * 10
+        )
         
-        # Identify the user
-        if not user.is_identified:
-            user.user_id = fake.email()
-            user.is_identified = True
-            user.form_type = form_type
-            
-            # If trial signup, determine path
-            if form_type == 'trial_signup':
-                user.trial_path = get_trial_path()
-                user.trial_start_date = current_date
+        # Identify user on certain events
+        if not user.is_identified and current_event in ['trial_started', 'account_created', 'demo_requested']:
+            if random.random() < 0.7:
+                user.user_id = str(uuid.uuid4())
+                user.email = f"user_{user.device_id[:8]}@example.com"
+                user.is_identified = True
         
-        # Add form submission event
+        update_lifecycle_stage(user, current_event)
+        
         events.append({
-            'event_type': form_config['event_name'],
-            'is_form_fill': True,
-            'form_type': form_type,
-            'trial_path': user.trial_path if form_type == 'trial_signup' else None,
+            'event_id': str(uuid.uuid1()),
+            'event_time': event_time.isoformat(),
+            'event_date': event_time.date().isoformat(),
+            'event_type': current_event,
+            'device_id': user.device_id,
+            'user_id': user.user_id,
+            'email': user.email,
+            'is_identified': user.is_identified,
+            'is_customer': user.is_customer,
+            'lifecycle_stage': user.lifecycle_stage,
+            'session_id': session_id,
         })
         
-        engagement_score = calculate_engagement_score(events)
-    
-    # Check for trial conversion
-    if user.trial_start_date and not user.converted_to_paid:
-        days_in_trial = (current_date - user.trial_start_date).days
+        user.last_event_type = current_event
         
-        if 10 <= days_in_trial <= 16:
-            path_config = TRIAL_CONVERSION_PATHS[user.trial_path]
-            
-            # Check if they convert
-            if random.random() < (path_config['conversion_rate_to_paid'] / 7):  # Spread over 7 days
-                product = select_product_tier(user.trial_path)
-                user.converted_to_paid = True
-                user.product_sku = product['sku']
-                
-                # Add conversion event
-                events.append({
-                    'event_type': 'trial_converted',
-                    'is_conversion': True,
-                    'trial_path': user.trial_path,
-                    'product_sku': product['sku'],
-                    'conversion_day': days_in_trial,
-                })
-            
-            elif days_in_trial >= 14:
-                events.append({
-                    'event_type': 'trial_expired',
-                    'trial_path': user.trial_path,
-                })
+        # Get next event from flow
+        next_event = get_next_event_from_flow(current_event)
+        if next_event:
+            current_event = next_event
+        else:
+            current_event = random.choice(stage_events.get(user.lifecycle_stage, ALL_EVENTS))
     
-    # Update user engagement
-    tier = get_engagement_tier(engagement_score)
-    user.total_engagement_score += engagement_score
-    user.engagement_tier = tier
-    
-    return events, engagement_score
+    user.session_count += 1
+    return events
 
-def schedule_return_session(user, current_date, engagement_score):
-    """Determine if and when user will return"""
-    tier = get_engagement_tier(engagement_score)
-    config = RETURN_PROBABILITY[tier]
+def create_daily_summary(user: UserState, events: List[dict], current_date) -> DailySummary:
+    """Create summary from events"""
+    event_types = [e['event_type'] for e in events]
+    engagement = sum(EVENT_ENGAGEMENT_SCORES.get(et, 1) for et in event_types)
     
-    if random.random() < config['return_rate']:
-        days_until = random.randint(*config['days_until_return'])
-        user.scheduled_return_date = current_date + timedelta(days=days_until)
-        return True
+    if engagement > 50:
+        return_prob = random.uniform(0.7, 0.95)
+    elif engagement > 20:
+        return_prob = random.uniform(0.4, 0.7)
+    else:
+        return_prob = random.uniform(0.1, 0.4)
     
-    return False
-
-def create_event_record(event_data, user, session_id, event_time, device, geo, source_info, campaign, event_id):
-    """Create a complete event record"""
-    event_type = event_data['event_type']
-    
-    # Build event properties
-    event_properties = {
-        'source': source_info['source'],
-        'medium': source_info['medium'],
-        'engagement_tier': user.engagement_tier,
-    }
-    
-    # Add campaign if paid traffic
-    if campaign:
-        event_properties['campaign_name'] = campaign['name']
-        event_properties['campaign_id'] = campaign['id']
-        event_properties['campaign_type'] = campaign['type']
-    
-    # Add form-specific properties
-    if event_data.get('is_form_fill'):
-        event_properties['form_type'] = event_data['form_type']
-        if event_data.get('trial_path'):
-            event_properties['trial_path'] = event_data['trial_path']
-    
-    # Add conversion properties
-    if event_data.get('is_conversion'):
-        event_properties['product_sku'] = event_data['product_sku']
-        event_properties['trial_path'] = event_data['trial_path']
-        event_properties['conversion_day'] = event_data['conversion_day']
-    
-    # Build user properties
-    user_properties = {
-        'user_type': 'identified' if user.is_identified else 'anonymous',
-        'engagement_tier': user.engagement_tier,
-        'total_sessions': user.session_count,
-        'is_returning': user.is_returning_user(),
-    }
-    
-    if user.is_identified:
-        user_properties['lifecycle_stage'] = 'Trial' if user.trial_start_date else 'Lead'
-        if user.converted_to_paid:
-            user_properties['lifecycle_stage'] = 'Customer'
-    
-    return {
-        'server_received_time': (event_time + timedelta(milliseconds=random.randint(10, 500))).isoformat(),
-        'event_time': event_time.isoformat(),
-        'processed_time': (event_time + timedelta(milliseconds=random.randint(100, 2000))).isoformat(),
-        'client_upload_time': (event_time + timedelta(milliseconds=random.randint(5, 100))).isoformat(),
-        'client_event_time': event_time.isoformat(),
-        'server_upload_time': (event_time + timedelta(milliseconds=random.randint(200, 1000))).isoformat(),
-        
-        'user_id': user.user_id,
-        'device_id': user.device_id,
-        'uuid': str(uuid.uuid4()),
-        'amplitude_id': random.randint(100000000, 999999999),
-        'session_id': session_id,
-        'event_id': event_id,
-        '$insert_id': str(uuid.uuid4()),
-        
-        'event_type': event_type,
-        'app': random.randint(100000, 999999),
-        'version_name': f"{random.randint(1, 5)}.{random.randint(0, 9)}.{random.randint(0, 20)}",
-        'start_version': f"{random.randint(1, 5)}.{random.randint(0, 9)}.0",
-        
-        'platform': device['type'] if device['type'] != 'Web' else 'Web',
-        'os_name': device['os'],
-        'os_version': device['version'],
-        'device_type': device['type'],
-        'device_family': device['family'],
-        'device_carrier': device['carrier'],
-        
-        'country': geo['country'],
-        'region': fake.state(),
-        'city': fake.city(),
-        'dma': fake.city(),
-        'location_lat': float(fake.latitude()),
-        'location_lng': float(fake.longitude()),
-        
-        'ip_address': fake.ipv4(),
-        'library': f"amplitude-{device['type'].lower()}/3.{random.randint(0, 9)}.{random.randint(0, 9)}",
-        'language': fake.language_code(),
-        
-        'paying': user.converted_to_paid,
-        
-        'event_properties': event_properties,
-        'user_properties': user_properties,
-        'group_properties': {},
-        'groups': {},
-        'data': {},
-        'amplitude_attribution_ids': None,
-        'sample_rate': None,
-        
-        '_generated_at': datetime.now().isoformat(),
-    }
-
-# ==========================================
-# MAIN EVENT STREAM GENERATOR
-# ==========================================
-
-@dlt.resource(write_disposition="append", table_name="event_stream")
-def event_stream():
-    """Generate realistic event stream with engagement-based behavior"""
-    
-    event_id = 1
-    users_to_schedule = []  # Track users who need to return
-    
-    for day in range(DAYS_OF_DATA):
-        current_date = START_DATE + timedelta(days=day)
-        daily_metrics = get_daily_metrics(day)
-        
-        # Calculate daily user counts
-        new_users_today = int(daily_metrics['new_users'] * 0.9)  # 90% actually create sessions
-        
-        # Process returning users scheduled for today
-        returning_users_today = [u for u in users_to_schedule 
-                                if u.scheduled_return_date and u.scheduled_return_date.date() == current_date.date()]
-        
-        print(f"Day {day}: {new_users_today} new users, {len(returning_users_today)} returning users")
-        
-        # Generate sessions for new users
-        for _ in range(new_users_today):
-            # Create new user
-            device_id = str(uuid.uuid4())
-            user = get_or_create_user(device_id)
-            user.session_count = 1
-            user.last_session_date = current_date
-            
-            # Select traffic source
-            source_info = random.choices(TRAFFIC_SOURCES, weights=[s['weight'] for s in TRAFFIC_SOURCES])[0]
-            
-            # Get campaign attribution (new users only get acquisition campaigns)
-            campaign = get_campaign_for_traffic(source_info['source'], source_info['medium'], False)
-            
-            # Generate session
-            session_id = int(current_date.timestamp() * 1000) + random.randint(0, 86400000)
-            session_start = current_date + timedelta(hours=random.randint(6, 22), minutes=random.randint(0, 59))
-            device = random.choice(DEVICES)
-            geo = random.choices(GEO_DISTRIBUTION, weights=[g['weight'] for g in GEO_DISTRIBUTION])[0]
-            
-            events, engagement_score = generate_session_events(user, current_date, source_info, campaign)
-            
-            # Create event records
-            for event_data in events:
-                event_time = session_start + timedelta(seconds=random.randint(0, 1800))
-                
-                record = create_event_record(
-                    event_data, user, session_id, event_time, device, geo, 
-                    source_info, campaign, event_id
-                )
-                
-                yield record
-                event_id += 1
-            
-            # Schedule return session
-            if schedule_return_session(user, current_date, engagement_score):
-                users_to_schedule.append(user)
-        
-        # Generate sessions for returning users
-        for user in returning_users_today:
-            user.session_count += 1
-            user.last_session_date = current_date
-            user.scheduled_return_date = None  # Clear scheduled return
-            
-            # Select traffic source (may be different from first visit)
-            source_info = random.choices(TRAFFIC_SOURCES, weights=[s['weight'] for s in TRAFFIC_SOURCES])[0]
-            
-            # Get campaign attribution (returning users can see re-engagement)
-            campaign = get_campaign_for_traffic(source_info['source'], source_info['medium'], True)
-            
-            # Generate session
-            session_id = int(current_date.timestamp() * 1000) + random.randint(0, 86400000)
-            session_start = current_date + timedelta(hours=random.randint(6, 22), minutes=random.randint(0, 59))
-            device = random.choice(DEVICES)
-            geo = random.choices(GEO_DISTRIBUTION, weights=[g['weight'] for g in GEO_DISTRIBUTION])[0]
-            
-            events, engagement_score = generate_session_events(user, current_date, source_info, campaign)
-            
-            # Create event records
-            for event_data in events:
-                event_time = session_start + timedelta(seconds=random.randint(0, 1800))
-                
-                record = create_event_record(
-                    event_data, user, session_id, event_time, device, geo, 
-                    source_info, campaign, event_id
-                )
-                
-                yield record
-                event_id += 1
-            
-            # May schedule another return
-            if schedule_return_session(user, current_date, engagement_score):
-                if user not in users_to_schedule:
-                    users_to_schedule.append(user)
-        
-        # Clean up users who won't return (keep list manageable)
-        users_to_schedule = [u for u in users_to_schedule 
-                            if u.scheduled_return_date and u.scheduled_return_date > current_date]
-
-
-if __name__ == "__main__":
-    pipeline = dlt.pipeline(
-        pipeline_name="amplitude_events",
-        destination="filesystem",
-        dataset_name="amplitude"
+    return DailySummary(
+        device_id=user.device_id,
+        user_id=user.user_id,
+        activity_date=current_date.date().isoformat(),
+        email=user.email,
+        is_identified=user.is_identified,
+        is_customer=user.is_customer,
+        events_today=len(events),
+        engagement_score_today=engagement,
+        lifecycle_stage=user.lifecycle_stage,
+        return_probability=return_prob,
+        total_sessions=user.session_count,
+        last_event_today=event_types[-1] if event_types else ""
     )
+
+def get_returning_users(target_date) -> List[UserState]:
+    """Query returning users from DuckDB"""
+    try:
+        db = duckdb.connect(DB_PATH, read_only=True)
+        threshold = random.uniform(0.3, 0.7)
+        limit = random.randint(500, 1500)
+        
+        result = db.sql(f"""
+            SELECT DISTINCT ON (device_id)
+                device_id, user_id, email, is_identified, is_customer,
+                lifecycle_stage, last_event_today, return_probability, total_sessions
+            FROM daily_user_activity 
+            WHERE return_probability > {threshold}
+            AND activity_date >= '{(target_date - timedelta(days=7)).date()}'
+            ORDER BY device_id, activity_date DESC
+            LIMIT {limit}
+        """).fetchdf()
+        
+        users = []
+        for _, row in result.iterrows():
+            users.append(UserState(
+                device_id=row['device_id'],
+                user_id=row['user_id'],
+                email=row.get('email', ''),
+                is_identified=row.get('is_identified', False),
+                is_customer=row.get('is_customer', False),
+                session_count=int(row.get('total_sessions', 1)),
+                lifecycle_stage=row.get('lifecycle_stage', 'awareness'),
+                last_event_type=row.get('last_event_today', '')
+            ))
+        
+        db.close()
+        return users
+    except:
+        return []
+
+def generate_day(day_num: int):
+    """Generate events for one day"""
+    current_date = START_DATE + timedelta(days=day_num)
+    month_num = day_num // 30
     
-    load_info = pipeline.run(event_stream(), loader_file_format="parquet")
+    print(f"Day {day_num}: {current_date.date()}")
     
-    print(f"\n✓ Event stream generated:")
-    print(f"  - {DAYS_OF_DATA} days of data")
-    print(f"  - Engagement-based return behavior")
-    print(f"  - Multiple form types with proper distribution")
-    print(f"  - Campaign attribution (re-engagement for returning users only)")
-    print(f"  - Trial conversion tracking")
+    # Get users
+    users = get_returning_users(current_date)
+    
+    if day_num == 0:
+        users.extend([UserState.new_lead(current_date) for _ in range(2000)])
+    
+    users.extend([UserState.new_anonymous(current_date) for _ in range(random.randint(2000,4000))])
+    
+    # Select active users (target 1-3k events)
+    target = random.randint(1000, 3000)
+    active = random.sample(users, min(target // 3, len(users)))
+    
+    # Generate events
+    events = []
+    summaries = []
+    
+    for user in active:
+        user_events = generate_event_sequence(user, current_date)
+        events.extend(user_events)
+        
+        if user_events:
+            summaries.append(create_daily_summary(user, user_events, current_date))
+    
+    print(f"  Events: {len(events)}, Summaries: {len(summaries)}")
+    
+    # Save summaries to DuckDB
+    pipeline = dlt.pipeline(
+        pipeline_name="event_stream",
+        destination=dlt.destinations.duckdb(DB_PATH),
+        dataset_name="events",
+        dev_mode=False
+    )
+    pipeline.run(daily_summary_resource(summaries))
+    
+    # Save events to parquet
+    event_count = len(events)
+    if events:
+        events_df = pl.DataFrame(events)
+        month_folder = f"data/month_{month_num}"
+        os.makedirs(month_folder, exist_ok=True)
+        events_df.write_parquet(f"{month_folder}/day_{day_num:03d}.parquet")
+        del events_df
+    
+    # CLEAR
+    del users, active, events, summaries
+    
+    return event_count
+    
+
+if __name__ == '__main__':
+    print("Generating events...")
+    
+    total = 0
+    for day in range(DAYS_TO_GENERATE):
+        total += generate_day(day)
+        
+        if day % 30 == 29:
+            print(f"✓ Month {day // 30}")

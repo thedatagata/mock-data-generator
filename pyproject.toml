@@ -1,13 +1,15 @@
 [project]
-name = "data-swamp"
+name = "mock-data-generators"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "dlt[duckdb,filesystem,gs,parquet]>=1.12.1",
+    "duckdb>=1.4.1",
     "faker>=37.12.0",
     "pandas>=2.3.3",
     "polars>=1.35.1",
     "pyarrow>=21.0.0",
+    "rich>=14.2.0",
 ]

@@ -1,84 +1,46 @@
-"""
-Google Analytics 4 Conversions Report Data Generator
-Generates conversion event data aligned with Amplitude
-"""
+"""GA4 Conversions - Date-partitioned"""
 import dlt
-import pandas as pd
 from datetime import datetime, timedelta
-import random
-import sys
-import os
+import random, sys, os
+from faker import Faker
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from shared_config import *
 
-from faker import Faker
-
-fake = Faker()
 Faker.seed(SEED)
 random.seed(SEED)
 
-print("Loading lead data...")
-byd_df = pd.read_parquet('gs://mock-source-data/customer_data_population/mock_bookyourdata/bookyourdata/1762095548.474671.701ad8b601.parquet')
-uplead_df = pd.read_parquet('gs://mock-source-data/customer_data_population/mock_upleads/uplead/1762095612.4264941.2fb362f699.parquet')
+KEY_EVENTS = ['sign_up', 'trial_started', 'purchase', 'demo_requested']
 
-leads_df = pd.concat([byd_df, uplead_df], ignore_index=True)
-print(f"Analyzed {len(leads_df)} leads")
-
-CONVERSION_EVENTS = [
-    {'name': 'sign_up', 'rate': CONVERSION_RATES['sign_up'], 'value': 0},
-    {'name': 'purchase', 'rate': CONVERSION_RATES['purchase'], 'value': AVERAGE_TRANSACTION_VALUE},
-    {'name': 'generate_lead', 'rate': 0.08, 'value': 25.00},
-]
-
-
-@dlt.resource(write_disposition="append", table_name="conversions_report")
+@dlt.resource(write_disposition="append", table_name="conversions_report", parallelized=True)
 def conversions_report():
-    """Generate GA4 conversions data"""
-    
     for day in range(DAYS_OF_DATA):
         current_date = START_DATE + timedelta(days=day)
-        date_str = current_date.strftime('%Y%m%d')
-        
         daily_metrics = get_daily_metrics(day)
+        daily_records = []
         
         for source in TRAFFIC_SOURCES:
-            for conversion in CONVERSION_EVENTS:
-                # Calculate conversions from daily metrics
-                if conversion['name'] == 'sign_up':
-                    base_count = daily_metrics['new_users']
-                elif conversion['name'] == 'purchase':
-                    base_count = daily_metrics['transactions']
-                else:
-                    base_count = daily_metrics['sessions']
+            source_users = int(daily_metrics['new_users'] * source['weight'])
+            
+            for event_name in KEY_EVENTS:
+                conversion_rate = {'sign_up': 0.15, 'trial_started': 0.12, 'purchase': 0.02, 'demo_requested': 0.08}.get(event_name, 0.05)
+                key_events = int(source_users * conversion_rate)
+                revenue = key_events * AVERAGE_TRANSACTION_VALUE if event_name == 'purchase' else 0
                 
-                conversions = int(base_count * source['weight'] * conversion['rate'] * random.uniform(0.9, 1.1))
-                users = int(conversions * random.uniform(0.8, 0.95))
-                total_value = round(conversions * conversion['value'], 2)
-                
-                yield {
-                    'date': date_str,
-                    'conversionName': conversion['name'],
-                    'sessionSource': source['source'],
-                    'sessionMedium': source['medium'],
-                    'sessionSourceMedium': f"{source['source']} / {source['medium']}",
-                    'sessionCampaignName': fake.catch_phrase() if source['medium'] == 'cpc' else '(not set)',
-                    
-                    'conversions': conversions,
-                    'totalUsers': users,
-                    'conversionValue': total_value,
-                    'conversionRate': round(conversion['rate'], 4),
-                    
-                    '_generated_at': datetime.now().isoformat(),
-                }
-
+                daily_records.append({
+                    'event_date': current_date.strftime('%Y%m%d'),
+                    'event_month': current_date.strftime('%Y-%m'),
+                    'event_name': event_name,
+                    'source_medium': f"{source['source']}/{source['medium']}",
+                    'key_events': key_events,
+                    'total_revenue': revenue,
+                    'total_users': int(key_events * random.uniform(0.8, 1.0)),
+                })
+        
+        if day % 10 == 0:
+            print(f"Day {day}/{DAYS_OF_DATA}")
+        yield daily_records
 
 if __name__ == "__main__":
-    pipeline = dlt.pipeline(
-        pipeline_name="ga4_conversions",
-        destination="filesystem",
-        dataset_name="google_analytics"
-    )
-    
-    load_info = pipeline.run(conversions_report(), loader_file_format="parquet")
-    
-    print(f"\n✓ Conversions data generated: {DAYS_OF_DATA} days aligned with Amplitude")
+    pipeline = dlt.pipeline(pipeline_name="ga4_conversions", destination="filesystem", dataset_name="google_analytics")
+    pipeline.run(conversions_report(), loader_file_format="parquet")
+    print("✓ Conversions report generated")

@@ -18,10 +18,7 @@ Faker.seed(SEED)
 random.seed(SEED)
 
 print("Loading lead data...")
-byd_df = pd.read_parquet('gs://mock-source-data/customer_data_population/mock_bookyourdata/bookyourdata/1762095548.474671.701ad8b601.parquet')
-uplead_df = pd.read_parquet('gs://mock-source-data/customer_data_population/mock_upleads/uplead/1762095612.4264941.2fb362f699.parquet')
-
-purchased_leads = pd.concat([byd_df, uplead_df], ignore_index=True)
+purchased_leads = pd.read_parquet('gs://mock-source-data/customer_data_population/unified_leads_enriched.parquet')
 print(f"Loaded {len(purchased_leads)} leads")
 
 

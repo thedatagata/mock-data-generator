@@ -1,3 +1,34 @@
 [destination.filesystem]
-bucket_url = "gs://mock-source-data/transactions/"
-loader_file_format = "parquet"
+bucket_url = "gs://your-bucket/stripe/"
+layout = "{table_name}/year={load_id|strftime('%Y')}/month={load_id|strftime('%m')}/{load_id}.{file_id}.{ext}"
+
+# Extract: Size-based rotation
+[sources.stripe_subscriptions.extract.data_writer]
+file_max_bytes = 50_000_000
+buffer_max_items = 10000
+
+[sources.stripe_transfers.extract.data_writer]
+file_max_bytes = 50_000_000
+buffer_max_items = 10000
+
+# Parallel extraction
+[extract]
+workers = 8
+max_parallel_items = 50
+
+# Normalize: Parallel processing
+[normalize]
+workers = 4
+start_method = "spawn"
+max_parallel_items = 30
+
+[normalize.data_writer]
+file_max_bytes = 50_000_000
+buffer_max_items = 10000
+
+# Load: High parallelism for GCS
+[load]
+workers = 20
+
+# Monitoring
+progress = "log"

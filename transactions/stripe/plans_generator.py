@@ -5,7 +5,13 @@ Subscription plans matching product tiers
 import dlt
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
+# Debug the path
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'digital_analytics'))
+from shared_config import *
+print(f"Looking for: {config_path}")
+print(f"Exists: {os.path.exists(config_path)}")
+
 from shared_config import *
 from datetime import datetime
 
@@ -18,57 +24,49 @@ Faker.seed(SEED)
 def plans():
     """Generate subscription plans"""
     
-    # Plan tiers with monthly pricing
-    tiers = [
-        {'name': 'Starter', 'monthly': 2900, 'annual': 29000},
-        {'name': 'Professional', 'monthly': 9900, 'annual': 99000},
-        {'name': 'Business', 'monthly': 19900, 'annual': 199000},
-        {'name': 'Enterprise', 'monthly': 49900, 'annual': 499000},
-    ]
-    
-    for tier in tiers:
+    for product in STRIPE_PRODUCTS:
         # Monthly plan
         yield {
             'id': f"plan_{fake.bothify(text='??????????????', letters='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789')}",
             'object': 'plan',
             'active': True,
-            'amount': tier['monthly'],
-            'amount_decimal': str(tier['monthly']),
+            'amount': product['price_monthly'],
+            'amount_decimal': str(product['price_monthly']),
             'billing_scheme': 'per_unit',
             'created': int(START_DATE.timestamp()),
             'currency': 'usd',
             'interval': 'month',
             'interval_count': 1,
             'livemode': False,
-            'metadata': {'tier': tier['name']},
-            'nickname': f"{tier['name']} Monthly",
-            'product': f"prod_{fake.bothify(text='??????????????', letters='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789')}",
+            'metadata': {'tier': product['name']},
+            'nickname': f"{product['name']} Monthly",
+            'product': product['id'],
             'tiers_mode': None,
             'transform_usage': None,
-            'trial_period_days': 14,
+            'trial_period_days': product['trial_days'],
             'usage_type': 'licensed',
             '_generated_at': datetime.now().isoformat(),
         }
         
-        # Annual plan (discounted)
+        # Annual plan
         yield {
             'id': f"plan_{fake.bothify(text='??????????????', letters='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789')}",
             'object': 'plan',
             'active': True,
-            'amount': tier['annual'],
-            'amount_decimal': str(tier['annual']),
+            'amount': product['price_annual'],
+            'amount_decimal': str(product['price_annual']),
             'billing_scheme': 'per_unit',
             'created': int(START_DATE.timestamp()),
             'currency': 'usd',
             'interval': 'year',
             'interval_count': 1,
             'livemode': False,
-            'metadata': {'tier': tier['name'], 'discount': '17%'},
-            'nickname': f"{tier['name']} Annual",
-            'product': f"prod_{fake.bothify(text='??????????????', letters='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789')}",
+            'metadata': {'tier': product['name'], 'discount': '17%'},
+            'nickname': f"{product['name']} Annual",
+            'product': product['id'],
             'tiers_mode': None,
             'transform_usage': None,
-            'trial_period_days': 14,
+            'trial_period_days': product['trial_days'],
             'usage_type': 'licensed',
             '_generated_at': datetime.now().isoformat(),
         }

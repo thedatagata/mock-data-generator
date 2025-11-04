@@ -9,7 +9,8 @@ from datetime import datetime, timedelta
 import random
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+# Path to digital_analytics where shared_config lives
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'digital_analytics')))
 from shared_config import PAID_CAMPAIGNS
 from faker import Faker
 

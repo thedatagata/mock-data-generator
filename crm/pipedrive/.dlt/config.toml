@@ -1,3 +1,3 @@
 [destination.filesystem]
-bucket_url = "gs://mock-source-data/crm"
+bucket_url = "gs://mock-source-data/crm/"
 loader_file_format = "parquet"

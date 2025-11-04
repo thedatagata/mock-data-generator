@@ -1,0 +1,6 @@
+[sources.filesystem]
+bucket_url = "gs://mock-source-data/"
+
+[destination.filesystem]
+bucket_url = "gs://mock-source-data/transformed/"
+

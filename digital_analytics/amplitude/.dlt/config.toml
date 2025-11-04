@@ -1,3 +1,25 @@
+[sources.filesystem]
+bucket_url = "C:/Users/yalel/OneDrive/Desktop/swamp_life/deno_gata/data_swamp/digital_analytics/amplitude/data"
+file_glob = "month_*/day_*.parquet"
+
 [destination.filesystem]
-bucket_url = "gs://mock-source-data/digital_analytics"
-loader_file_format = "parquet"
+bucket_url = "gs://mock-source-data/digital_analytics/"
+
+[extract]
+workers=8
+max_parallel_items=50
+
+[normalize]
+workers=1
+start_method="spawn"
+
+[normalize.data_writer]
+file_max_items=25000
+buffer_max_items=10000
+
+[load]
+workers=10
+
+[runtime]
+log_level="INFO"
+progress="log"

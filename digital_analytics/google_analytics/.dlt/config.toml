@@ -1,3 +1,42 @@
 [destination.filesystem]
-bucket_url = "gs://mock-source-data/digital_analytics"
-loader_file_format = "parquet"
+bucket_url = "gs://mock-source-data/digital_analytics/"
+layout = "{table_name}/year={YYYY}/month={MM}/{load_id}.{file_id}.{ext}"
+
+# Extract: Size-based rotation
+[sources.ga4_events.extract.data_writer]
+file_max_bytes = 50_000_000
+buffer_max_items = 10000
+
+[sources.ga4_traffic_acquisition.extract.data_writer]
+file_max_bytes = 50_000_000
+buffer_max_items = 10000
+
+[sources.ga4_user_acquisition.extract.data_writer]
+file_max_bytes = 50_000_000
+buffer_max_items = 10000
+
+[sources.ga4_conversions.extract.data_writer]
+file_max_bytes = 50_000_000
+buffer_max_items = 10000
+
+# Parallel extraction
+[extract]
+workers = 8
+max_parallel_items = 50
+
+# Normalize: Parallel processing
+[normalize]
+workers = 4
+start_method = "spawn"
+max_parallel_items = 30
+
+[normalize.data_writer]
+file_max_bytes = 50_000_000
+buffer_max_items = 10000
+
+# Load: High parallelism for GCS
+[load]
+workers = 20
+
+# Monitoring
+progress = "log"
